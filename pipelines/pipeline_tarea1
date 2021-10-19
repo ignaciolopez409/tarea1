@@ -1,0 +1,69 @@
+//socket de conexion con Docker
+def docker_host = 'tcp://192.168.248.85:2376'
+//credenciales TLS Docker almacenadas en Jenkins
+def docker_credential = 'docker_cert'
+//URL de conexion a hub.docker
+def docker_hub = 'https://registry.hub.docker.com'
+//Access token hub.docker
+def dockerhub_credential = 'dockerhubCredentials'
+//Nombre del repositorio a utilizar en hub.docker
+def image_repo = "ignaciolopezventimiglia/${modulo}"
+//Variable a utilizar en el pipeline para definir el nombre de la imagen
+def image_version = ''
+def image = ''
+def modulo = params.modulo
+
+//funcion para build de imagen
+def buildPushImage(env, version, docker_host, docker_credential, docker_hub, dockerhub_credential, image_repo, modulo){
+    docker.withTool('docker'){
+        docker.withServer(docker_host,docker_credential){
+            docker.withRegistry(docker_hub,dockerhub_credential){
+                image = docker.build(image_repo + ":" + version + "-" + env, "--build-arg JAR_FILE=target/${modulo}-${version}.jar .")
+                image.push()
+            }
+        }
+    }    
+}
+
+//Pipeline
+node('java-8'){
+    stage("Clone and build project"){
+        checkout([$class: 'GitSCM', branches: [[name: '*/main']], extensions: [[$class: 'LocalBranch', localBranch: 'main'], [$class: 'RelativeTargetDirectory', relativeTargetDir: 'repo']], userRemoteConfigs: [[credentialsId: 'github-pem', url: "git@github.com:ignaciolopez409/${params.modulo}.git"]]])
+        dir('repo'){
+            image_version = readMavenPom(file: 'pom.xml').getVersion()
+            withMaven(maven: 'maven-3.6.0'){
+                withSonarQubeEnv(installationName: 'sonarqube', credentialsId: 'tarea'){
+                    sh "git config --global user.email 'ignaciolopez409@gmail.com'"
+                    sh "git config --global user.name 'Nacho Lopez'"
+                    switch(params.tarea){
+                        case "build":
+                            sh "mvn clean package ${SONAR_MAVEN_GOAL} -Dsonar.login=${SONAR_AUTH_TOKEN} -Dsonar.host.url=${SONAR_HOST_URL}"
+                            break
+                        case "release":
+                            image_version = image_version.split('-')[0] //quta SNAPSHOT de la version tomada
+                            sh "mvn release:prepare ${SONAR_MAVEN_GOAL} -Dsonar.login=${SONAR_AUTH_TOKEN} -Dsonar.host.url=${SONAR_HOST_URL} release:perform"
+                            break
+                        default:
+                            println "No se seleccionó tarea"
+                            break
+                    }
+                }
+            }    
+        }
+    }
+    stage('Tag imagen dev'){
+        dir('repo'){
+            buildPushImage('dev', image_version, docker_host, docker_credential, docker_hub, dockerhub_credential, image_repo, modulo)
+        }
+    }
+    stage('Tag imagen test'){
+        dir('repo'){
+            buildPushImage('test', image_version, docker_host, docker_credential, docker_hub, dockerhub_credential, image_repo, modulo)
+        }
+    }
+    stage('Tag imagen stage'){
+        dir('repo'){
+            buildPushImage('stage', image_version, docker_host, docker_credential, docker_hub, dockerhub_credential, image_repo, modulo)
+        }
+    }    
+}    
